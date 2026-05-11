@@ -50,6 +50,7 @@ import {
   runPipeline
 } from "@/lib/api";
 import type {
+  PipelineStage,
   PipelineSnapshot,
   ReportResult,
   SearchPaper

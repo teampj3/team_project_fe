@@ -1089,11 +1089,27 @@ function ReportWorkspace({
   const currentStage = getEffectiveStage(report);
   const errorCode = getEffectiveErrorCode(report);
   const message = getEffectiveMessage(report);
+  const [now, setNow] = useState(() => Date.now());
   const papers = useMemo(() => report?.searchResults ?? [], [report]);
   const { cards, stats } = useMemo(
     () => buildPipelineCards(report, loading),
     [loading, report]
   );
+
+  useEffect(() => {
+    if (status !== "PROCESSING") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [status]);
+
+  const searchRetrySeconds = useMemo(() => {
+    if (status !== "PROCESSING" || currentStage !== "search" || !report?.pipeline?.startedAt) {
+      return 0;
+    }
+    const startedAt = new Date(report.pipeline.startedAt).getTime();
+    if (Number.isNaN(startedAt)) return 0;
+    return Math.max(0, Math.floor((now - startedAt) / 1000));
+  }, [currentStage, now, report?.pipeline?.startedAt, status]);
   if (!report && !loading) {
     return (
       <section className="mx-auto grid max-w-[1440px] gap-4 xl:grid-cols-[1.2fr_0.8fr]">
@@ -1168,8 +1184,16 @@ function ReportWorkspace({
         <ExecutionBanner
           tone="progress"
           title="파이프라인 실행 중"
-          body={`현재 ${currentStage || "search"} 단계 진행 상태를 기다리는 중입니다.`}
-          meta={currentStage || "PROCESSING"}
+          body={
+            currentStage === "search" && searchRetrySeconds >= 15
+              ? `외부 검색 API 재시도 중입니다. 현재 ${searchRetrySeconds}초째 search 단계를 처리하고 있습니다.`
+              : `현재 ${currentStage || "search"} 단계 진행 상태를 기다리는 중입니다.`
+          }
+          meta={
+            currentStage === "search" && searchRetrySeconds >= 15
+              ? `search retry · ${searchRetrySeconds}s`
+              : currentStage || "PROCESSING"
+          }
         />
       ) : null}
 

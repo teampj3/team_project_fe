@@ -1,0 +1,8 @@
+{
+  "/_not-found/page": "app/_not-found/page.js",
+  "/account/page": "app/account/page.js",
+  "/editor/[reportId]/page": "app/editor/[reportId]/page.js",
+  "/page": "app/page.js",
+  "/outputs/[...path]/route": "app/outputs/[...path]/route.js",
+  "/api/[...path]/route": "app/api/[...path]/route.js"
+}

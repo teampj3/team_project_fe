@@ -5,8 +5,12 @@ import { useSearchParams } from "next/navigation";
 import {
   AlertCircle,
   Archive,
+  BadgeInfo,
   BookOpenText,
   CheckCircle2,
+  ChevronRight,
+  Circle,
+  CircleDot,
   Download,
   Ellipsis,
   FileText,
@@ -15,18 +19,25 @@ import {
   Heading1,
   Heading2,
   History,
+  KeyRound,
   Layers3,
   List,
   ListChecks,
   Loader2,
+  LogIn,
+  LogOut,
   MessageSquareQuote,
   NotebookPen,
   PanelLeft,
   PencilLine,
   Plus,
   Send,
+  ShieldAlert,
+  Settings2,
   TextQuote,
   Trash2,
+  X,
+  UserPlus,
   UserRound
 } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -34,6 +45,9 @@ import {
   FormEvent,
   Fragment,
   KeyboardEvent,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
   Suspense,
   useEffect,
   useMemo,
@@ -41,15 +55,35 @@ import {
   useState
 } from "react";
 import {
+  ApiError,
+  createArchive,
+  deleteArchive,
+  deleteMe,
+  getArchive,
+  getArchives,
+  getMe,
+  getPipelineMetadata,
   getPipelineResult,
+  getReaderResults,
   getRelevanceResults,
   getReport,
-  generateMockReport,
   getReports,
   getSearchResults,
-  runPipeline
+  login,
+  runPipeline,
+  signup
 } from "@/lib/api";
+import {
+  authTokenStorageKey,
+  defaultProfilePreferences,
+  readProfilePreferences,
+  writeProfilePreferences,
+  type ProfilePreferences
+} from "@/lib/profile";
 import type {
+  ArchiveSnapshot,
+  AuthUser,
+  PipelineMetadata,
   PipelineStage,
   PipelineSnapshot,
   ReportResult,
@@ -60,7 +94,13 @@ const quickTopics = [
   "건강보험심사평가원 데이터 API 활용 보고서",
   "병원 추천 AI agent 개발 전략",
   "PDF 텍스트 분석 및 교수 발언 추출",
-  "안드로이드 앱 프로젝트 아이디어 추천"
+  "안드로이드 앱 프로젝트 아이디어 추천",
+  "생성형 AI 기반 보고서 자동화 전략",
+  "공공데이터를 활용한 서비스 기획",
+  "클라우드 기반 AI 시스템 아키텍처",
+  "데이터 분석 기반 사용자 행동 예측",
+  "AI 에이전트 업무 자동화 사례",
+  "SW 기술 트렌드 조사 보고서"
 ];
 
 const commonMarkClass =
@@ -92,13 +132,19 @@ type ArchiveDocument = {
 
 const archiveStorageKey = "ai-report-workspace-archives";
 const hiddenReportsStorageKey = "ai-report-hidden-reports";
+const hiddenArchivesStorageKey = "ai-report-hidden-archives";
 type ReportContextMenuState = {
   reportId: string;
   x: number;
   y: number;
 } | null;
+type ArchiveContextMenuState = {
+  archiveId: string;
+  x: number;
+  y: number;
+} | null;
 
-type WorkspaceTab = "search" | "relevance" | "draft";
+type WorkspaceTab = "search" | "reader" | "relevance" | "draft";
 type PipelineCardState = "pending" | "running" | "completed" | "failed";
 
 const notionBlockKinds: Array<{
@@ -136,6 +182,16 @@ function createBlock(
   };
 }
 
+function parseMarkdownHeading(line: string) {
+  const match = line.match(/^(#{1,6})\s+(.*)$/);
+  if (!match) return null;
+
+  return {
+    level: match[1].length,
+    content: match[2].trim()
+  };
+}
+
 function normalizeBlock(block: {
   id?: string;
   kind?: string;
@@ -167,6 +223,10 @@ function makeBlocksFromText(text: string): EditorBlock[] {
   }
 
   return lines.map((line, index) => {
+    const heading = parseMarkdownHeading(line);
+    if (heading) {
+      return createBlock(heading.level === 1 ? "heading-1" : "heading-2", heading.content);
+    }
     if (index === 0) return createBlock("heading-2", line);
     if (line.startsWith("- ")) return createBlock("bullet", line.replace(/^- /, ""));
     if (line.startsWith("[ ] ")) return createBlock("checklist", line.replace(/^\[ \] /, ""));
@@ -189,6 +249,65 @@ function formatArchiveTime(value: string) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit"
+  });
+}
+
+function mapArchiveToReport(archive: ArchiveSnapshot): ReportResult {
+  const pipelineResult = archive.pipelineResult;
+  const searchResults = archive.searchResults ?? [];
+  const readerResults = archive.readerResults ?? [];
+  const relevanceResults = archive.relevanceResults ?? [];
+  const status = pipelineResult?.status ?? archive.status;
+
+  return {
+    id: archive.reportId,
+    topic: archive.topic || archive.title,
+    status,
+    claudeDraft: archive.claudeDraft,
+    commonHighlights: archive.commonHighlights ?? [],
+    differentHighlights: archive.differentHighlights ?? [],
+    reviewResult: archive.reviewResult,
+    mergedReport: archive.mergedReport,
+    failureMessage: archive.failureMessage,
+    createdAt: archive.createdAt,
+    updatedAt: archive.updatedAt,
+    pipeline: {
+      runId: pipelineResult?.runId ?? archive.runId,
+      reportId: pipelineResult?.reportId ?? archive.reportId,
+      topic: pipelineResult?.topic ?? archive.topic,
+      currentStage: pipelineResult?.currentStage,
+      searchCount: pipelineResult?.searchCount ?? searchResults.length,
+      summaryCount: pipelineResult?.summaryCount ?? readerResults.length,
+      relevanceCount: pipelineResult?.relevanceCount ?? relevanceResults.length,
+      reportPath: pipelineResult?.reportPath,
+      startedAt: pipelineResult?.startedAt,
+      finishedAt: pipelineResult?.finishedAt,
+      status,
+      message: pipelineResult?.message,
+      errorCode: pipelineResult?.errorCode,
+      visualization: pipelineResult?.visualization
+    },
+    searchResults,
+    readerResults,
+    relevanceResults,
+    visualization: archive.visualization ?? pipelineResult?.visualization
+  };
+}
+
+function hasMarkdownImages(text?: string) {
+  return /!\[[^\]]*\]\(([^)]+)\)/.test(text || "");
+}
+
+function getVisualizationAssets(report: ReportResult | null) {
+  return report?.visualization?.assets ?? report?.pipeline?.visualization?.assets ?? {};
+}
+
+function formatDate(value?: string) {
+  if (!value) return "-";
+  return new Date(value).toLocaleDateString("ko-KR", {
+    year: "numeric",
+    month: "short",
+    day: "numeric"
   });
 }
 
@@ -267,12 +386,124 @@ function renderHighlightedText(
   );
 }
 
+function renderMarkdownBody(
+  text: string,
+  commonHighlights: string[] = [],
+  differentHighlights: string[] = []
+) {
+  const lines = (text || "").split("\n");
+  const nodes: ReactNode[] = [];
+
+  lines.forEach((rawLine, index) => {
+    const line = rawLine.trim();
+    const key = `md-${index}`;
+
+    if (!line) {
+      nodes.push(<div key={key} className="h-4" />);
+      return;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingText = headingMatch[2].trim();
+      const className =
+        level === 1
+          ? "text-[42px] font-semibold leading-[1.08] tracking-normal text-[#222420]"
+          : level === 2
+            ? "text-[30px] font-semibold leading-[1.18] tracking-normal text-[#222420]"
+            : level === 3
+              ? "text-[24px] font-semibold leading-[1.22] tracking-normal text-[#222420]"
+              : "text-[20px] font-semibold leading-[1.28] tracking-normal text-[#222420]";
+
+      const Tag = (level === 1 ? "h1" : level === 2 ? "h2" : level === 3 ? "h3" : "h4") as
+        | "h1"
+        | "h2"
+        | "h3"
+        | "h4";
+
+      nodes.push(
+        <Tag key={key} className={`${className} my-3`}>
+          {renderHighlightedText(headingText, commonHighlights, differentHighlights)}
+        </Tag>
+      );
+      return;
+    }
+
+    if (/^---+$/.test(line)) {
+      nodes.push(<hr key={key} className="my-6 border-[#dde1d8]" />);
+      return;
+    }
+
+    const imageMatch = line.match(/^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/);
+    if (imageMatch) {
+      nodes.push(
+        <figure key={key} className="my-5">
+          <img
+            src={imageMatch[2]}
+            alt={imageMatch[1] || "시각화 이미지"}
+            className="max-w-full rounded-xl border border-[#e4e8e0] bg-white shadow-[0_10px_28px_rgba(31,38,34,0.06)]"
+          />
+        </figure>
+      );
+      return;
+    }
+
+    if (line.startsWith("- ")) {
+      nodes.push(
+        <ul key={key} className="my-3 list-disc space-y-2 pl-6">
+          <li className="text-[15px] leading-7 text-[#252823]">
+            {renderHighlightedText(line.replace(/^- /, ""), commonHighlights, differentHighlights)}
+          </li>
+        </ul>
+      );
+      return;
+    }
+
+    if (line.startsWith("> ")) {
+      nodes.push(
+        <blockquote
+          key={key}
+          className="my-4 border-l-4 border-[#d8dccf] pl-4 text-[15px] leading-7 text-[#4f554c]"
+        >
+          {renderHighlightedText(line.replace(/^>\s*/, ""), commonHighlights, differentHighlights)}
+        </blockquote>
+      );
+      return;
+    }
+
+    nodes.push(
+      <p key={key} className="my-3 text-[15px] leading-7 text-[#252823]">
+        {renderHighlightedText(line, commonHighlights, differentHighlights)}
+      </p>
+    );
+  });
+
+  return nodes;
+}
+
 function buildReportPath(report?: ReportResult) {
   if (report?.pipeline?.reportPath) return report.pipeline.reportPath;
   return "-";
 }
+function getArchiveStatusClasses(status?: string, active?: boolean) {
+  const palette = {
+    border: "border-[#e3e5de]",
+    bg: "bg-white",
+    hover: "hover:bg-[#f5f7f2]"
+  };
+
+  if (active) {
+    return `${palette.border} ${palette.bg}`;
+  }
+
+  return `${palette.border} ${palette.bg} ${palette.hover}`;
+}
 
 function getEffectiveStatus(report: ReportResult | null) {
+  if (report?.status === "COMPLETED" || report?.status === "FAILED") {
+    return report.status;
+  }
   return report?.pipeline?.status ?? report?.status;
 }
 
@@ -288,6 +519,116 @@ function getEffectiveMessage(report: ReportResult | null) {
   return report?.pipeline?.message ?? report?.failureMessage ?? null;
 }
 
+function getProcessingStageBody(report: ReportResult | null, now: number) {
+  const status = getEffectiveStatus(report);
+  const currentStage = getEffectiveStage(report);
+  const message = getEffectiveMessage(report);
+  const summaryCount = report?.pipeline?.summaryCount ?? 0;
+
+  if (status !== "PROCESSING") {
+    return {
+      body: message || "현재 파이프라인 진행 상태를 확인하는 중입니다.",
+      meta: currentStage || status || "PROCESSING"
+    };
+  }
+
+  if (currentStage === "search") {
+    let retrySeconds = 0;
+    if (report?.pipeline?.startedAt) {
+      const startedAt = new Date(report.pipeline.startedAt).getTime();
+      if (!Number.isNaN(startedAt)) {
+        retrySeconds = Math.max(0, Math.floor((now - startedAt) / 1000));
+      }
+    }
+
+    if (retrySeconds >= 15) {
+      return {
+        body:
+          message ||
+          `외부 검색 API 재시도 중입니다. 현재 ${retrySeconds}초째 search 단계를 처리하고 있습니다.`,
+        meta: `search retry · ${retrySeconds}s`
+      };
+    }
+
+    return {
+      body: message || "현재 search 단계 진행 상태를 기다리는 중입니다.",
+      meta: currentStage
+    };
+  }
+
+  if (currentStage == "reader") {
+    if (summaryCount > 0) {
+      return {
+        body:
+          message ||
+          `${summaryCount}편 요약 완료, 남은 논문을 계속 처리 중입니다. reader_results는 완료 시점에 반영됩니다.`,
+        meta: `${summaryCount}편 요약 완료`
+      };
+    }
+
+    return {
+      body:
+        message ||
+        "논문 요약 생성 중입니다. reader_results 파일이 아직 없어도 정상 진행 상태일 수 있습니다.",
+      meta: "요약 생성 중"
+    };
+  }
+
+  if (currentStage === "relevance") {
+    return {
+      body: message || "관련성 점수를 계산하고 선별 결과를 정리하는 중입니다.",
+      meta: currentStage
+    };
+  }
+
+  if (currentStage === "writer") {
+    return {
+      body: message || "보고서 초안 생성 중입니다. 부분 초안이 있으면 순차적으로 화면에 반영됩니다.",
+      meta: currentStage
+    };
+  }
+
+  return {
+    body: message || `현재 ${currentStage || "search"} 단계 진행 상태를 기다리는 중입니다.`,
+    meta: currentStage || "PROCESSING"
+  };
+}
+
+function getReaderEmptyText(report: ReportResult | null) {
+  const status = getEffectiveStatus(report);
+  const currentStage = getEffectiveStage(report);
+  const summaryCount = report?.pipeline?.summaryCount ?? 0;
+  const message = getEffectiveMessage(report);
+
+  if (status === "PROCESSING" && currentStage === "reader") {
+    return summaryCount > 0
+      ? `${summaryCount}편 요약 완료, 남은 논문을 계속 처리 중입니다.`
+      : message || "논문 요약 생성 중입니다. reader 단계 완료 후 요약 결과가 표시됩니다.";
+  }
+
+  if (status === "FAILED" && currentStage === "reader") {
+    return message || "reader 단계에서 요약 생성에 실패했습니다.";
+  }
+
+  return "아직 표시할 요약 결과가 없습니다.";
+}
+
+function getRelevanceEmptyText(report: ReportResult | null) {
+  const status = getEffectiveStatus(report);
+  const currentStage = getEffectiveStage(report);
+  const message = getEffectiveMessage(report);
+
+  if (status === "PROCESSING" && currentStage === "reader") {
+    return "Reader 단계 진행 중입니다. relevance 결과는 reader 완료 후 생성됩니다.";
+  }
+
+  if (status === "PROCESSING" && currentStage === "relevance") {
+    return message || "아직 relevance 결과 파일이 생성되지 않았습니다.";
+  }
+
+  return "아직 표시할 관련성 결과가 없습니다.";
+}
+
 function buildPipelineCards(report: ReportResult | null, loading: boolean) {
   const status = getEffectiveStatus(report);
   const stage = getEffectiveStage(report);
@@ -296,7 +637,11 @@ function buildPipelineCards(report: ReportResult | null, loading: boolean) {
   const currentStageIndex = stage ? stageOrder.indexOf(stage) : -1;
 
   const hasSearch = Boolean((report?.pipeline?.searchCount ?? 0) > 0 || report?.searchResults?.length);
-  const hasReader = Boolean((report?.pipeline?.summaryCount ?? 0) > 0 || report?.gptDraft || report?.claudeDraft);
+  const hasReader = Boolean(
+    (report?.pipeline?.summaryCount ?? 0) > 0 ||
+      (report?.readerResults?.length ?? 0) > 0 ||
+      report?.claudeDraft
+  );
   const hasRelevance = Boolean((report?.pipeline?.relevanceCount ?? 0) > 0 || report?.relevanceResults?.length);
   const hasWriter = Boolean(report?.mergedReport);
 
@@ -389,28 +734,61 @@ function HomeWorkspace() {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [topic, setTopic] = useState("");
+  const [quickTopicPage, setQuickTopicPage] = useState(0);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [hasEnteredWorkspace, setHasEnteredWorkspace] = useState(false);
   const [activeReport, setActiveReport] = useState<ReportResult | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [useMockEndpoint, setUseMockEndpoint] = useState(false);
   const [archiveDocuments, setArchiveDocuments] = useState<ArchiveDocument[]>([]);
   const [editorTitle, setEditorTitle] = useState("최종 보고서 초안");
   const [editorBlocks, setEditorBlocks] = useState<EditorBlock[]>([createBlock("paragraph")]);
   const [activeArchiveId, setActiveArchiveId] = useState<string | null>(null);
   const [hiddenReportIds, setHiddenReportIds] = useState<string[]>([]);
+  const [hiddenArchiveIds, setHiddenArchiveIds] = useState<string[]>([]);
   const [reportContextMenu, setReportContextMenu] = useState<ReportContextMenuState>(null);
+  const [archiveContextMenu, setArchiveContextMenu] = useState<ArchiveContextMenuState>(null);
   const [hydratedFromQuery, setHydratedFromQuery] = useState(false);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "signup">("login");
+  const [isAccountMenuOpen, setIsAccountMenuOpen] = useState(false);
+  const [isAccountSettingsOpen, setIsAccountSettingsOpen] = useState(false);
+  const [accountSettingsTab, setAccountSettingsTab] = useState<"account" | "workspace">(
+    "account"
+  );
+  const [accountSettingsMessage, setAccountSettingsMessage] = useState<string | null>(null);
+  const [authForm, setAuthForm] = useState({
+    email: "",
+    name: "",
+    password: ""
+  });
+  const [profilePreferences, setProfilePreferences] = useState<ProfilePreferences>(
+    defaultProfilePreferences
+  );
 
   const reportsQuery = useQuery({
     queryKey: ["reports"],
     queryFn: getReports
   });
 
+  const archivesQuery = useQuery({
+    queryKey: ["archives", accessToken],
+    queryFn: () => getArchives(accessToken as string),
+    enabled: Boolean(accessToken),
+    retry: false
+  });
+  const refetchArchives = archivesQuery.refetch;
+
   const reports = useMemo(() => reportsQuery.data ?? [], [reportsQuery.data]);
   const filteredReports = useMemo(
     () => reports.filter((report) => !hiddenReportIds.includes(String(report.id ?? report.topic))),
     [hiddenReportIds, reports]
+  );
+  const serverArchives = useMemo(
+    () =>
+      (archivesQuery.data ?? []).filter(
+        (archive) => !hiddenArchiveIds.includes(archive.archiveId)
+      ),
+    [archivesQuery.data, hiddenArchiveIds]
   );
   const currentReport = activeReport ?? filteredReports[0] ?? null;
   const requestedWorkspace = searchParams.get("workspace") === "1";
@@ -419,7 +797,7 @@ function HomeWorkspace() {
   const pipelineResultQuery = useQuery({
     queryKey: ["pipeline-result", activeRunId],
     queryFn: () => getPipelineResult(activeRunId as string),
-    enabled: Boolean(activeRunId && !useMockEndpoint),
+    enabled: Boolean(activeRunId),
     refetchInterval: (query) => {
       const result = query.state.data as PipelineSnapshot | undefined;
       if (!result) return 1500;
@@ -430,7 +808,7 @@ function HomeWorkspace() {
   const searchResultsQuery = useQuery({
     queryKey: ["search-results", activeRunId],
     queryFn: () => getSearchResults(activeRunId as string),
-    enabled: Boolean(activeRunId && !useMockEndpoint),
+    enabled: Boolean(activeRunId),
     refetchInterval: () =>
       pipelineResultQuery.data?.status === "COMPLETED" ||
       pipelineResultQuery.data?.status === "FAILED"
@@ -441,7 +819,7 @@ function HomeWorkspace() {
   const relevanceResultsQuery = useQuery({
     queryKey: ["relevance-results", activeRunId],
     queryFn: () => getRelevanceResults(activeRunId as string),
-    enabled: Boolean(activeRunId && !useMockEndpoint),
+    enabled: Boolean(activeRunId),
     refetchInterval: () =>
       pipelineResultQuery.data?.status === "COMPLETED" ||
       pipelineResultQuery.data?.status === "FAILED"
@@ -454,7 +832,7 @@ function HomeWorkspace() {
   const activeRunReportQuery = useQuery({
     queryKey: ["run-report", activeRunReportId],
     queryFn: () => getReport(activeRunReportId as string),
-    enabled: Boolean(activeRunReportId && !useMockEndpoint),
+    enabled: Boolean(activeRunReportId),
     refetchInterval: () =>
       pipelineResultQuery.data?.status === "COMPLETED" ||
       pipelineResultQuery.data?.status === "FAILED"
@@ -463,7 +841,7 @@ function HomeWorkspace() {
   });
 
   const liveRunReport = useMemo(() => {
-    if (!activeRunId || useMockEndpoint) return null;
+    if (!activeRunId) return null;
 
     const report = activeRunReportQuery.data;
     const pipeline = pipelineResultQuery.data;
@@ -485,11 +863,30 @@ function HomeWorkspace() {
     activeRunReportQuery.data,
     pipelineResultQuery.data,
     relevanceResultsQuery.data,
-    searchResultsQuery.data,
-    useMockEndpoint
+    searchResultsQuery.data
   ]);
 
   const displayReport = liveRunReport ?? currentReport;
+  const quickTopicGroups = useMemo(() => {
+  const size = 4;
+  const groups: string[][] = [];
+
+  for (let i = 0; i < quickTopics.length; i += size) {
+    groups.push(quickTopics.slice(i, i + size));
+  }
+
+  return groups;
+}, []);
+
+const visibleQuickTopics =
+  quickTopicGroups[quickTopicPage] ?? quickTopicGroups[0] ?? [];
+
+  const meQuery = useQuery({
+    queryKey: ["auth-me", accessToken],
+    queryFn: () => getMe(accessToken as string),
+    enabled: Boolean(accessToken),
+    retry: false
+  });
 
   useEffect(() => {
     try {
@@ -526,7 +923,73 @@ function HomeWorkspace() {
   }, [hiddenReportIds]);
 
   useEffect(() => {
-    const closeMenu = () => setReportContextMenu(null);
+    try {
+      const raw = window.localStorage.getItem(hiddenArchivesStorageKey);
+      if (!raw) return;
+      setHiddenArchiveIds(JSON.parse(raw) as string[]);
+    } catch {
+      // Ignore invalid local data.
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(hiddenArchivesStorageKey, JSON.stringify(hiddenArchiveIds));
+  }, [hiddenArchiveIds]);
+
+  useEffect(() => {
+    try {
+      const savedToken = window.localStorage.getItem(authTokenStorageKey);
+      if (savedToken) {
+        setAccessToken(savedToken);
+      }
+    } catch {
+      // Ignore invalid local auth data.
+    }
+    setProfilePreferences(readProfilePreferences());
+  }, []);
+
+  useEffect(() => {
+    if (accessToken) {
+      window.localStorage.setItem(authTokenStorageKey, accessToken);
+    } else {
+      window.localStorage.removeItem(authTokenStorageKey);
+    }
+  }, [accessToken]);
+
+  useEffect(() => {
+    if (!(meQuery.error instanceof ApiError)) return;
+    if (meQuery.error.status !== 401) return;
+    setAccessToken(null);
+    queryClient.removeQueries({ queryKey: ["auth-me"] });
+  }, [meQuery.error, queryClient]);
+
+  useEffect(() => {
+    if (!isAccountMenuOpen) return;
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("[data-account-menu-root]")) return;
+      setIsAccountMenuOpen(false);
+    };
+    window.addEventListener("click", closeMenu);
+    return () => window.removeEventListener("click", closeMenu);
+  }, [isAccountMenuOpen]);
+
+  useEffect(() => {
+    if (!isAccountSettingsOpen) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsAccountSettingsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isAccountSettingsOpen]);
+
+  useEffect(() => {
+    const closeMenu = () => {
+      setReportContextMenu(null);
+      setArchiveContextMenu(null);
+    };
     window.addEventListener("click", closeMenu);
     return () => window.removeEventListener("click", closeMenu);
   }, []);
@@ -564,26 +1027,41 @@ function HomeWorkspace() {
     queryClient.invalidateQueries({ queryKey: ["reports"] });
   }, [pipelineResultQuery.data?.status, queryClient]);
 
+  useEffect(() => {
+    if (!accessToken || !activeRunId || !pipelineResultQuery.data) return;
+    refetchArchives();
+  }, [
+    accessToken,
+    activeRunId,
+    pipelineResultQuery.data,
+    pipelineResultQuery.data?.status,
+    pipelineResultQuery.data?.currentStage,
+    pipelineResultQuery.data?.finishedAt,
+    queryClient,
+    refetchArchives
+  ]);
+  useEffect(() => {
+  if (quickTopicGroups.length <= 1) return;
+
+  const timer = window.setInterval(() => {
+    setQuickTopicPage((prev) => (prev + 1) % quickTopicGroups.length);
+  }, 3500);
+
+  return () => window.clearInterval(timer);
+}, [quickTopicGroups.length]);
+
   const createMutation = useMutation({
-    mutationFn: (nextTopic: string) =>
-      useMockEndpoint ? generateMockReport(nextTopic) : runPipeline(nextTopic),
+    mutationFn: (nextTopic: string) => runPipeline(nextTopic, accessToken),
     onSuccess: (result) => {
       setHasEnteredWorkspace(true);
       setIsSidebarOpen(true);
       setActiveArchiveId(null);
       setTopic("");
-      if (useMockEndpoint) {
-        const report = result as ReportResult;
-        setActiveRunId(null);
-        setActiveReport(report);
-        setEditorTitle(report.topic || "최종 보고서 초안");
-        setEditorBlocks(makeBlocksFromText(textOrEmpty(report.mergedReport)));
-        queryClient.invalidateQueries({ queryKey: ["reports"] });
-        return;
-      }
-
       const pipelineRun = result as { runId: string; topic: string };
       setActiveRunId(pipelineRun.runId);
+      if (accessToken) {
+        refetchArchives();
+      }
       setActiveReport({
         id: pipelineRun.runId,
         topic: pipelineRun.topic,
@@ -596,6 +1074,88 @@ function HomeWorkspace() {
         searchResults: [],
         relevanceResults: []
       });
+    }
+  });
+
+  const loginMutation = useMutation({
+    mutationFn: login,
+    onSuccess: (session) => {
+      setAccessToken(session.accessToken);
+      setAuthForm({ email: "", name: "", password: "" });
+      queryClient.invalidateQueries({ queryKey: ["auth-me"] });
+    }
+  });
+
+  const signupMutation = useMutation({
+    mutationFn: signup,
+    onSuccess: (session) => {
+      setAccessToken(session.accessToken);
+      setAuthForm({ email: "", name: "", password: "" });
+      setAuthMode("login");
+      queryClient.invalidateQueries({ queryKey: ["auth-me"] });
+    }
+  });
+
+  const deleteMeMutation = useMutation({
+    mutationFn: () => deleteMe(accessToken as string),
+    onSuccess: () => {
+      setAccessToken(null);
+      queryClient.removeQueries({ queryKey: ["auth-me"] });
+      queryClient.removeQueries({ queryKey: ["archives"] });
+    }
+  });
+
+  const archiveSaveMutation = useMutation({
+    mutationFn: ({ reportId, title }: { reportId: string; title: string }) =>
+      createArchive({ reportId, title }, accessToken as string),
+    onSuccess: (archive) => {
+      queryClient.invalidateQueries({ queryKey: ["archives", accessToken] });
+      setActiveArchiveId(archive.archiveId);
+    }
+  });
+
+  const archiveLoadMutation = useMutation({
+    mutationFn: (archiveId: string) => getArchive(archiveId, accessToken as string),
+    onSuccess: (archive) => {
+      setHasEnteredWorkspace(true);
+      setIsSidebarOpen(true);
+      setActiveRunId(null);
+      setActiveArchiveId(archive.archiveId);
+      queryClient.setQueryData<ArchiveSnapshot[] | undefined>(
+        ["archives", accessToken],
+        (current) =>
+          current?.map((item) =>
+            item.archiveId === archive.archiveId
+              ? {
+                  ...item,
+                  title: archive.title,
+                  topic: archive.topic,
+                  status: archive.pipelineResult?.status ?? archive.status,
+                  updatedAt: archive.updatedAt,
+                  mergedReport: archive.mergedReport,
+                  visualization: archive.visualization
+                }
+              : item
+          )
+      );
+      const restoredReport = mapArchiveToReport(archive);
+      setActiveReport(restoredReport);
+      setEditorTitle(archive.title || restoredReport.topic || "아카이브 보고서");
+      setEditorBlocks(makeBlocksFromText(textOrEmpty(archive.mergedReport)));
+    }
+  });
+
+  const archiveDeleteMutation = useMutation({
+    mutationFn: (archiveId: string) => deleteArchive(archiveId, accessToken as string),
+    onSuccess: (_, archiveId) => {
+      setArchiveContextMenu(null);
+      if (activeArchiveId === archiveId) {
+        setActiveArchiveId(null);
+      }
+      refetchArchives();
+    },
+    onError: (error) => {
+      window.alert(error instanceof Error ? error.message : "아카이브 삭제에 실패했습니다.");
     }
   });
 
@@ -617,7 +1177,7 @@ function HomeWorkspace() {
     submitTopic();
   }
 
-  function loadArchive(document: ArchiveDocument) {
+  function loadLocalArchive(document: ArchiveDocument) {
     setHasEnteredWorkspace(true);
     setIsSidebarOpen(true);
     setActiveRunId(null);
@@ -627,6 +1187,14 @@ function HomeWorkspace() {
   }
 
   function saveArchive() {
+    if (accessToken && displayReport?.id) {
+      archiveSaveMutation.mutate({
+        reportId: String(displayReport.id),
+        title: (editorTitle.trim() || displayReport.topic || "아카이브 보고서").trim()
+      });
+      return;
+    }
+
     const title = editorTitle.trim() || "이름 없는 문서";
     const blocks = editorBlocks.map((block) => ({
       ...block,
@@ -656,6 +1224,11 @@ function HomeWorkspace() {
     }
   }
 
+  function loadServerArchive(archiveId: string) {
+    if (!accessToken) return;
+    archiveLoadMutation.mutate(archiveId);
+  }
+
   function createBlankDocument() {
     setHasEnteredWorkspace(true);
     setIsSidebarOpen(true);
@@ -664,6 +1237,18 @@ function HomeWorkspace() {
     setEditorTitle(displayReport?.topic || "새 작업 문서");
     setEditorBlocks([createBlock("paragraph")]);
   }
+
+  function resetToHome() {
+  setHasEnteredWorkspace(false);
+  setActiveReport(null);
+  setActiveRunId(null);
+  setActiveArchiveId(null);
+  setTopic("");
+  setEditorTitle("최종 보고서 초안");
+  setEditorBlocks([createBlock("paragraph")]);
+
+  window.history.replaceState(null, "", "/?workspace=1");
+}
 
   function hideReport(report: ReportResult) {
     const reportKey = String(report.id ?? report.topic);
@@ -675,9 +1260,68 @@ function HomeWorkspace() {
     }
   }
 
+  function hideArchive(archiveId: string) {
+    if (accessToken) {
+      archiveDeleteMutation.mutate(archiveId);
+      return;
+    }
+    setHiddenArchiveIds((ids) => Array.from(new Set([...ids, archiveId])));
+    setArchiveContextMenu(null);
+    if (activeArchiveId === archiveId) {
+      setActiveArchiveId(null);
+    }
+  }
+
   function printWorkspace() {
     window.print();
   }
+
+  function submitAuth() {
+    const email = authForm.email.trim();
+    const password = authForm.password.trim();
+    const name = authForm.name.trim();
+
+    if (!email || !password) return;
+    if (authMode === "signup") {
+      if (!name) return;
+      signupMutation.mutate({ email, name, password });
+      return;
+    }
+    loginMutation.mutate({ email, password });
+  }
+
+  function clearAuth() {
+    setAccessToken(null);
+    setAuthForm({ email: "", name: "", password: "" });
+    queryClient.removeQueries({ queryKey: ["auth-me"] });
+  }
+
+  function saveAccountSettings() {
+    writeProfilePreferences(profilePreferences);
+    setAccountSettingsMessage("설정이 이 브라우저에 저장되었습니다.");
+    window.setTimeout(() => setAccountSettingsMessage(null), 2400);
+  }
+
+  const authError =
+    (loginMutation.error as ApiError | null) ||
+    (signupMutation.error as ApiError | null) ||
+    (deleteMeMutation.error as ApiError | null) ||
+    (meQuery.error as ApiError | null);
+  const authBusy =
+    loginMutation.isPending ||
+    signupMutation.isPending ||
+    deleteMeMutation.isPending ||
+    meQuery.isLoading;
+  const currentUser = meQuery.data ?? null;
+  const displayName =
+    profilePreferences.displayName.trim() || currentUser?.name || "Report AI";
+  const introHeading =
+    currentUser || profilePreferences.displayName.trim()
+      ? `${displayName}님, 안녕하십니까`
+      : "안녕하십니까 Report AI입니다.";
+  const roleLabel = profilePreferences.roleLabel.trim() || "연구원";
+  const workspaceLabel =
+    profilePreferences.teamName.trim() || "AI Report Workspace";
 
   return (
     <main className="min-h-screen bg-[#f4f5f2] text-[#202124]">
@@ -694,28 +1338,31 @@ function HomeWorkspace() {
 
       <div className={`grid min-h-screen ${isSidebarOpen ? "lg:grid-cols-[280px_minmax(0,1fr)]" : "lg:grid-cols-[0_minmax(0,1fr)]"}`}>
         <aside
-          className={`min-h-screen overflow-hidden border-r border-[#dedfd9] bg-[#fbfbf8] transition-all duration-200 ${
+            className={`sticky top-0 flex h-screen flex-col overflow-hidden border-r border-[#dedfd9] bg-[#fbfbf8] transition-all duration-200 ${
             isSidebarOpen ? "w-[280px] opacity-100" : "w-0 border-r-0 opacity-0"
           }`}
         >
           <div className="flex items-center gap-3 border-b border-[#ebece6] px-5 py-5">
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#1f2520] text-white">
+            <button
+              type="button"
+              onClick={resetToHome}
+              className="grid h-10 w-10 place-items-center rounded-xl bg-[#1f2520] text-white transition hover:scale-[0.98] hover:shadow-[0_8px_20px_rgba(31,38,34,0.18)]"
+              aria-label="메인 페이지로 이동"
+            >
               <GitCompare className="h-5 w-5" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-semibold">AI Report Workspace</p>
-              <div className="flex items-center gap-2">
-                <p className="truncate text-xs text-[#7a7f76]">Research drafting studio</p>
-                <button
-                  type="button"
-                  onClick={() => setIsSidebarOpen(false)}
-                  className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[#e2e4dd] bg-white text-[#50554d]"
-                  aria-label="사이드바 닫기"
-                >
-                  <PanelLeft className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
+            </button>
+            <button type="button" onClick={resetToHome} className="min-w-0 flex-1 text-left">
+              <p className="text-sm font-semibold">{workspaceLabel}</p>
+              <p className="truncate text-xs text-[#7a7f76]">Research drafting studio</p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(false)}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-full border border-[#e2e4dd] bg-white text-[#50554d]"
+              aria-label="사이드바 닫기"
+            >
+              <PanelLeft className="h-4 w-4" />
+            </button>
           </div>
 
           <section className="min-h-0 flex-1 px-4 py-4">
@@ -797,15 +1444,80 @@ function HomeWorkspace() {
                 </div>
                 <button
                   type="button"
-                  onClick={createBlankDocument}
+                  onClick={resetToHome}
                   className="inline-flex h-7 items-center gap-1 rounded-full border border-[#dadcd5] bg-white px-2.5 text-xs text-[#4d534b]"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   새 문서
                 </button>
               </div>
-              <div className="thin-scrollbar max-h-[22vh] space-y-2 overflow-auto pr-1">
-                {archiveDocuments.length === 0 ? (
+              <div className="thin-scrollbar max-h-[50vh] space-y-2 overflow-auto pr-1">
+                {accessToken ? (
+                  archivesQuery.isLoading ? (
+                    <p className="rounded-2xl border border-dashed border-[#dcdfd6] bg-white px-4 py-4 text-sm leading-6 text-[#7c8179]">
+                      아카이브를 불러오는 중입니다.
+                    </p>
+                  ) : serverArchives.length === 0 ? (
+                    <p className="rounded-2xl border border-dashed border-[#dcdfd6] bg-white px-4 py-4 text-sm leading-6 text-[#7c8179]">
+                      저장된 결과 스냅샷이 없습니다.
+                    </p>
+                  ) : (
+                    serverArchives.map((archive) => {
+                      const active = activeArchiveId === archive.archiveId;
+                      const archiveStatus =
+                        active && displayReport
+                          ? getEffectiveStatus(displayReport) ?? archive.status
+                          : archive.status;
+                      return (
+                        <button
+                          key={archive.archiveId}
+                          type="button"
+                          onClick={() => loadServerArchive(archive.archiveId)}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            setArchiveContextMenu({
+                              archiveId: archive.archiveId,
+                              x: event.clientX,
+                              y: event.clientY
+                            });
+                          }}
+                          className={`block w-full rounded-2xl border px-4 py-3 text-left transition ${getArchiveStatusClasses(
+                            archiveStatus,
+                            active
+                          )}`}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="line-clamp-1 text-sm font-medium">
+                              {archive.title || archive.topic || "아카이브 결과"}
+                            </p>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                const rect = event.currentTarget.getBoundingClientRect();
+                                setArchiveContextMenu({
+                                  archiveId: archive.archiveId,
+                                  x: rect.left,
+                                  y: rect.bottom + 6
+                                });
+                              }}
+                              className="rounded-full px-1.5 py-1 text-[#8b9087] hover:bg-[#eef1eb]"
+                            >
+                              <Ellipsis className="h-4 w-4" />
+                            </button>
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-xs leading-5 text-[#6d7168]">
+                            {archive.topic || archive.mergedReport || "저장된 보고서 스냅샷"}
+                          </p>
+                          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-[#8a8f87]">
+                            <span>{formatArchiveTime(archive.updatedAt || archive.createdAt || new Date().toISOString())}</span>
+                            <span>{archiveStatus || "UNKNOWN"}</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )
+                ) : archiveDocuments.length === 0 ? (
                   <p className="rounded-2xl border border-dashed border-[#dcdfd6] bg-white px-4 py-4 text-sm leading-6 text-[#7c8179]">
                     저장한 문서가 없습니다.
                   </p>
@@ -823,7 +1535,7 @@ function HomeWorkspace() {
                       >
                         <button
                           type="button"
-                          onClick={() => loadArchive(document)}
+                          onClick={() => loadLocalArchive(document)}
                           className="w-full text-left"
                         >
                           <p className="line-clamp-1 text-sm font-medium">{document.title}</p>
@@ -851,15 +1563,42 @@ function HomeWorkspace() {
           </section>
 
           <div className="mt-auto border-t border-[#ebece6] p-3">
-            <div className="flex items-center gap-3 rounded-2xl bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.03)]">
-              <div className="grid h-9 w-9 place-items-center rounded-full bg-[#ece9ff] text-sm font-semibold text-[#7f6bff]">
-                사
-              </div>
-              <div>
-                <p className="text-sm font-semibold leading-5">사용자</p>
-                <p className="text-xs text-[#7a7f76]">연구원</p>
-              </div>
-            </div>
+            <AccountLauncher
+              authBusy={authBusy}
+              authError={authError}
+              authForm={authForm}
+              authMode={authMode}
+              currentUser={currentUser}
+              displayName={displayName}
+              roleLabel={roleLabel}
+              isOpen={isAccountMenuOpen}
+              onAuthFormChange={setAuthForm}
+              onAuthModeChange={(mode) => {
+                setAuthMode(mode);
+                loginMutation.reset();
+                signupMutation.reset();
+              }}
+              onClearAuthError={() => {
+                loginMutation.reset();
+                signupMutation.reset();
+                deleteMeMutation.reset();
+              }}
+              onDeleteAccount={() => {
+                if (!window.confirm("회원 정보를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
+                  return;
+                }
+                deleteMeMutation.mutate();
+              }}
+              onLogout={clearAuth}
+              onSubmit={submitAuth}
+              onToggle={() => setIsAccountMenuOpen((prev) => !prev)}
+              onClose={() => setIsAccountMenuOpen(false)}
+              onOpenSettings={(tab) => {
+                setAccountSettingsTab(tab);
+                setIsAccountMenuOpen(false);
+                setIsAccountSettingsOpen(true);
+              }}
+            />
           </div>
         </aside>
 
@@ -872,23 +1611,14 @@ function HomeWorkspace() {
                     <div>
                       <div className="flex items-center gap-2 text-sm font-semibold">
                         <Layers3 className="h-4 w-4 text-[#53604c]" />
-                        AI 결과 비교 리포트 워크스페이스
+                        {workspaceLabel}
                       </div>
                       <p className="mt-1 text-xs text-[#70756d]">
-                        주제 입력 {"->"} 초안 비교 {"->"} 공통/차이 강조 {"->"} 리뷰{" "}
+                        주제 입력 {"->"} 초안 생성 {"->"} 공통/차이 강조 {"->"} 리뷰{" "}
                         {"->"} 최종 보고서
                       </p>
                     </div>
                     <div className="flex items-center gap-2">
-                      <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-2xl border border-[#d9ddd4] bg-white px-3 text-sm text-[#444840]">
-                        <input
-                          checked={useMockEndpoint}
-                          onChange={(event) => setUseMockEndpoint(event.target.checked)}
-                          type="checkbox"
-                          className="h-4 w-4 accent-[#53604c]"
-                        />
-                        Mock API
-                      </label>
                       <button
                         type="button"
                         onClick={submitTopic}
@@ -912,20 +1642,6 @@ function HomeWorkspace() {
                     rows={2}
                     className="min-h-[72px] w-full resize-y rounded-[24px] border border-[#cfd5ca] bg-white px-4 py-3 text-[15px] leading-6 outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
                   />
-
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {quickTopics.map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => setTopic(item)}
-                        className="inline-flex h-9 items-center gap-1.5 rounded-2xl border border-[#d9ddd4] bg-white px-3 text-xs text-[#484d45] hover:bg-[#f0f3ec]"
-                      >
-                        <FileText className="h-3.5 w-3.5" />
-                        {item}
-                      </button>
-                    ))}
-                  </div>
 
                   {createMutation.error ? (
                     <div className="mt-3 flex items-start gap-2 rounded-2xl border border-[#efc2b7] bg-[#fff3ef] px-3 py-2 text-sm text-[#8d382d]">
@@ -951,33 +1667,19 @@ function HomeWorkspace() {
                 onSubmit={handleSubmit}
                 className="w-full max-w-[980px] text-center"
               >
-                <div className="mb-6 flex items-center justify-end">
-                  <div className="ml-auto flex items-center gap-2">
-                    <label className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm text-[#444840]">
-                      <input
-                        checked={useMockEndpoint}
-                        onChange={(event) => setUseMockEndpoint(event.target.checked)}
-                        type="checkbox"
-                        className="h-4 w-4 accent-[#53604c]"
-                      />
-                      Mock API
-                    </label>
-                  </div>
-                </div>
-
                 <div className="mx-auto mb-6 inline-flex rounded-full bg-[#efede7] px-5 py-2 text-sm text-[#868076]">
-                  AI 결과 비교 리포트 워크스페이스
+                  {workspaceLabel}
                 </div>
                 <div className="mb-8 flex items-center justify-center gap-4">
                   <span className="grid h-16 w-16 place-items-center rounded-3xl bg-[#f7e9e1] text-[#d67253]">
                     <PencilLine className="h-8 w-8" />
                   </span>
                   <h1 className="text-5xl font-medium tracking-normal text-[#252622]">
-                    jjj님, 안녕하십니까
+                    {introHeading}
                   </h1>
                 </div>
                 <p className="mb-8 text-lg text-[#7d8179]">
-                  오늘 필요한 보고서 주제를 입력하면 초안 비교부터 최종 편집까지 이어집니다.
+                  오늘 필요한 보고서 주제를 입력하면 Claude 초안 생성부터 최종 편집까지 이어집니다.
                 </p>
 
                 <div className="rounded-[34px] border border-[#d8dcd2] bg-white p-6 shadow-[0_18px_48px_rgba(37,38,34,0.08)]">
@@ -1010,16 +1712,18 @@ function HomeWorkspace() {
                     </button>
                   </div>
                 </div>
-
-                <div className="mt-6 flex flex-wrap justify-center gap-2">
-                  {quickTopics.map((item) => (
+                <div className="mt-5 flex min-h-[88px] flex-wrap justify-center gap-2">
+                  {visibleQuickTopics.map((item, index) => (
                     <button
-                      key={item}
+                      key={`${item}-${quickTopicPage}`}
                       type="button"
                       onClick={() => setTopic(item)}
-                      className="inline-flex h-10 items-center gap-2 rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm text-[#4b5048]"
+                      className="quick-topic-flip inline-flex h-9 items-center gap-2 rounded-full border border-[#dedfd8] bg-white px-4 py-2 text-sm text-[#4f554c] shadow-sm transition hover:border-[#c6c8bf] hover:bg-[#f7f7f2]"
+                      style={{
+                        animationDelay: `${index * 90}ms`
+                      }}
                     >
-                      <FileText className="h-4 w-4" />
+                      <FileText className="h-4 w-4 text-[#7a7f76]" />
                       {item}
                     </button>
                   ))}
@@ -1056,6 +1760,52 @@ function HomeWorkspace() {
           </button>
         </div>
       ) : null}
+
+      {archiveContextMenu ? (
+        <div
+          className="fixed z-50 min-w-[170px] rounded-2xl border border-[#d9ddd4] bg-white p-2 shadow-[0_18px_48px_rgba(31,38,34,0.16)]"
+          style={{ left: archiveContextMenu.x, top: archiveContextMenu.y }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              if (!window.confirm("이 아카이브를 삭제하시겠습니까?")) return;
+              hideArchive(archiveContextMenu.archiveId);
+            }}
+            className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-[#8a5b54] hover:bg-[#f9ece8]"
+          >
+            <Trash2 className="h-4 w-4" />
+            삭제
+          </button>
+        </div>
+      ) : null}
+
+      {isAccountSettingsOpen ? (
+        <AccountSettingsModal
+          currentUser={currentUser}
+          displayName={displayName}
+          roleLabel={roleLabel}
+          authError={authError}
+          deletePending={deleteMeMutation.isPending}
+          preferences={profilePreferences}
+          savedMessage={accountSettingsMessage}
+          selectedTab={accountSettingsTab}
+          onClose={() => setIsAccountSettingsOpen(false)}
+          onDeleteAccount={() => {
+            if (!window.confirm("회원 정보를 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")) {
+              return;
+            }
+            deleteMeMutation.mutate();
+          }}
+          onLogout={() => {
+            clearAuth();
+            setIsAccountSettingsOpen(false);
+          }}
+          onPreferencesChange={setProfilePreferences}
+          onSavePreferences={saveAccountSettings}
+          onSelectTab={setAccountSettingsTab}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1068,6 +1818,675 @@ function WorkspacePageFallback() {
         워크스페이스를 불러오는 중입니다.
       </div>
     </main>
+  );
+}
+
+function AccountLauncher({
+  authBusy,
+  authError,
+  authForm,
+  authMode,
+  currentUser,
+  displayName,
+  roleLabel,
+  isOpen,
+  onAuthFormChange,
+  onAuthModeChange,
+  onClearAuthError,
+  onDeleteAccount,
+  onLogout,
+  onSubmit,
+  onToggle,
+  onClose,
+  onOpenSettings
+}: {
+  authBusy: boolean;
+  authError: ApiError | null;
+  authForm: { email: string; name: string; password: string };
+  authMode: "login" | "signup";
+  currentUser: AuthUser | null;
+  displayName: string;
+  roleLabel: string;
+  isOpen: boolean;
+  onAuthFormChange: Dispatch<
+    SetStateAction<{ email: string; name: string; password: string }>
+  >;
+  onAuthModeChange: (mode: "login" | "signup") => void;
+  onClearAuthError: () => void;
+  onDeleteAccount: () => void;
+  onLogout: () => void;
+  onSubmit: () => void;
+  onToggle: () => void;
+  onClose: () => void;
+  onOpenSettings: (tab: "account" | "workspace") => void;
+}) {
+  return (
+    <div data-account-menu-root className="relative">
+      {isOpen ? (
+        <AccountMenu
+          authBusy={authBusy}
+          authError={authError}
+          authForm={authForm}
+          authMode={authMode}
+          currentUser={currentUser}
+          displayName={displayName}
+          roleLabel={roleLabel}
+          onAuthFormChange={onAuthFormChange}
+          onAuthModeChange={onAuthModeChange}
+          onClearAuthError={onClearAuthError}
+          onDeleteAccount={onDeleteAccount}
+          onLogout={onLogout}
+          onSubmit={onSubmit}
+          onClose={onClose}
+          onOpenSettings={onOpenSettings}
+        />
+      ) : null}
+
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-3 rounded-2xl bg-white px-3 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.03)]"
+        aria-label="회원 메뉴 열기"
+      >
+        <div className="grid h-9 w-9 place-items-center rounded-full bg-[#ece9ff] text-sm font-semibold text-[#7f6bff]">
+          {displayName.slice(0, 1)}
+        </div>
+        <div className="min-w-0 flex-1 text-left">
+          <p className="truncate text-sm font-semibold leading-5">{displayName}</p>
+          <p className="truncate text-xs text-[#7a7f76]">
+            {currentUser ? roleLabel : "계정 메뉴"}
+          </p>
+        </div>
+        <ChevronRight
+          className={`h-4 w-4 shrink-0 text-[#7a7f76] transition-transform duration-150 ${
+            isOpen ? "-rotate-90" : "rotate-90"
+          }`}
+        />
+      </button>
+    </div>
+  );
+}
+
+function AccountMenu({
+  authBusy,
+  authError,
+  authForm,
+  authMode,
+  currentUser,
+  displayName,
+  roleLabel,
+  onAuthFormChange,
+  onAuthModeChange,
+  onClearAuthError,
+  onDeleteAccount,
+  onLogout,
+  onSubmit,
+  onClose,
+  onOpenSettings
+}: {
+  authBusy: boolean;
+  authError: ApiError | null;
+  authForm: { email: string; name: string; password: string };
+  authMode: "login" | "signup";
+  currentUser: AuthUser | null;
+  displayName: string;
+  roleLabel: string;
+  onAuthFormChange: (
+    value: SetStateAction<{ email: string; name: string; password: string }>
+  ) => void;
+  onAuthModeChange: (mode: "login" | "signup") => void;
+  onClearAuthError: () => void;
+  onDeleteAccount: () => void;
+  onLogout: () => void;
+  onSubmit: () => void;
+  onClose: () => void;
+  onOpenSettings: (tab: "account" | "workspace") => void;
+}) {
+  const helperText =
+    authError?.status === 409
+      ? "이미 존재하는 회원입니다."
+      : authError?.status === 401
+        ? "인증에 실패했습니다. 이메일과 비밀번호를 확인하세요."
+        : authError?.status === 400
+          ? "입력값 형식을 다시 확인하세요."
+          : authError?.message;
+
+  return (
+    <div
+      data-account-menu-root
+      className="absolute bottom-[76px] left-0 z-40 w-[280px] rounded-[28px] border border-[#e2e4dd] bg-white p-4 shadow-[0_22px_48px_rgba(31,38,34,0.16)]"
+    >
+      {currentUser ? (
+        <>
+          <div className="rounded-2xl border border-[#eceee8] bg-[#fafaf7] px-3 py-3">
+            <div className="flex items-center gap-3">
+              <div className="grid h-10 w-10 place-items-center rounded-full bg-[#ece9ff] text-sm font-semibold text-[#7f6bff]">
+                {displayName.slice(0, 1)}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-semibold leading-5">{displayName}</p>
+                <p className="truncate text-xs text-[#7a7f76]">{currentUser.email}</p>
+              </div>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-[#6d7168]">
+              <p>{roleLabel}</p>
+              <p>가입일 {formatDate(currentUser.createdAt)}</p>
+            </div>
+          </div>
+
+          <div className="mt-4 space-y-2">
+            <button
+              type="button"
+              onClick={() => onOpenSettings("account")}
+              className="flex w-full items-center justify-between rounded-2xl px-3 py-3 text-left text-sm text-[#2e332e] hover:bg-[#f4f6f0]"
+            >
+              <span className="inline-flex items-center gap-3">
+                <BadgeInfo className="h-5 w-5" />
+                회원 정보
+              </span>
+              <ChevronRight className="h-4 w-4 text-[#7a7f76]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => onOpenSettings("workspace")}
+              className="flex w-full items-center justify-between rounded-2xl px-3 py-3 text-left text-sm text-[#2e332e] hover:bg-[#f4f6f0]"
+            >
+              <span className="inline-flex items-center gap-3">
+                <Settings2 className="h-5 w-5" />
+                설정
+              </span>
+              <ChevronRight className="h-4 w-4 text-[#7a7f76]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onLogout();
+              }}
+              className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm text-[#2e332e] hover:bg-[#f4f6f0]"
+            >
+              <LogOut className="h-5 w-5" />
+              로그아웃
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onDeleteAccount();
+              }}
+              disabled={authBusy}
+              className="flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm text-[#8a5b54] hover:bg-[#fff3ef] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Trash2 className="h-5 w-5" />
+              회원 탈퇴
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-semibold leading-5">계정</p>
+              <p className="text-xs text-[#7a7f76]">로그인 후 회원 정보를 확인합니다.</p>
+            </div>
+            <div className="inline-flex rounded-full border border-[#e1e4dc] bg-[#f8f9f5] p-1">
+              <button
+                type="button"
+                onClick={() => onAuthModeChange("login")}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                  authMode === "login" ? "bg-white text-[#252622] shadow-sm" : "text-[#6f756d]"
+                }`}
+              >
+                로그인
+              </button>
+              <button
+                type="button"
+                onClick={() => onAuthModeChange("signup")}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                  authMode === "signup" ? "bg-white text-[#252622] shadow-sm" : "text-[#6f756d]"
+                }`}
+              >
+                회원가입
+              </button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="block">
+              <span className="mb-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#6d7168]">
+                <UserRound className="h-3.5 w-3.5" />
+                이메일
+              </span>
+              <input
+                value={authForm.email}
+                onChange={(event) => {
+                  onClearAuthError();
+                  onAuthFormChange((current) => ({ ...current, email: event.target.value }));
+                }}
+                type="email"
+                placeholder="user@example.com"
+                className="h-10 w-full rounded-xl border border-[#d9ddd4] bg-white px-3 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+              />
+            </label>
+
+            {authMode === "signup" ? (
+              <label className="block">
+                <span className="mb-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#6d7168]">
+                  <UserPlus className="h-3.5 w-3.5" />
+                  이름
+                </span>
+                <input
+                  value={authForm.name}
+                  onChange={(event) => {
+                    onClearAuthError();
+                    onAuthFormChange((current) => ({ ...current, name: event.target.value }));
+                  }}
+                  type="text"
+                  placeholder="Tester"
+                  className="h-10 w-full rounded-xl border border-[#d9ddd4] bg-white px-3 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                />
+              </label>
+            ) : null}
+
+            <label className="block">
+              <span className="mb-1 inline-flex items-center gap-1 text-[11px] font-medium text-[#6d7168]">
+                <KeyRound className="h-3.5 w-3.5" />
+                비밀번호
+              </span>
+              <input
+                value={authForm.password}
+                onChange={(event) => {
+                  onClearAuthError();
+                  onAuthFormChange((current) => ({ ...current, password: event.target.value }));
+                }}
+                type="password"
+                placeholder="password123"
+                className="h-10 w-full rounded-xl border border-[#d9ddd4] bg-white px-3 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+              />
+            </label>
+          </div>
+
+          {helperText ? (
+            <div className="mt-3 flex items-start gap-2 rounded-xl border border-[#efc2b7] bg-[#fff3ef] px-3 py-2 text-xs text-[#8d382d]">
+              <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <p>{helperText}</p>
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={
+              authBusy ||
+              !authForm.email.trim() ||
+              !authForm.password.trim() ||
+              (authMode === "signup" && !authForm.name.trim())
+            }
+            className="mt-3 inline-flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#273127] text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#a9aea5]"
+          >
+            {authBusy ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : authMode === "login" ? (
+              <LogIn className="h-4 w-4" />
+            ) : (
+              <UserPlus className="h-4 w-4" />
+            )}
+            {authMode === "login" ? "로그인" : "회원가입"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AccountSettingsModal({
+  currentUser,
+  displayName,
+  roleLabel,
+  authError,
+  deletePending,
+  preferences,
+  savedMessage,
+  selectedTab,
+  onClose,
+  onDeleteAccount,
+  onLogout,
+  onPreferencesChange,
+  onSavePreferences,
+  onSelectTab
+}: {
+  currentUser: AuthUser | null;
+  displayName: string;
+  roleLabel: string;
+  authError: ApiError | null;
+  deletePending: boolean;
+  preferences: ProfilePreferences;
+  savedMessage: string | null;
+  selectedTab: "account" | "workspace";
+  onClose: () => void;
+  onDeleteAccount: () => void;
+  onLogout: () => void;
+  onPreferencesChange: Dispatch<SetStateAction<ProfilePreferences>>;
+  onSavePreferences: () => void;
+  onSelectTab: (tab: "account" | "workspace") => void;
+}) {
+  const [isEditingAccount, setIsEditingAccount] = useState(false);
+  const [accountDraft, setAccountDraft] = useState({
+    displayName,
+    roleLabel
+  });
+
+  useEffect(() => {
+    setAccountDraft({ displayName, roleLabel });
+  }, [displayName, roleLabel]);
+
+  const helperText =
+    authError?.status === 409
+      ? "이미 존재하는 회원입니다."
+      : authError?.status === 401
+        ? "인증에 실패했습니다. 이메일과 비밀번호를 확인하세요."
+        : authError?.status === 400
+          ? "입력값 형식을 다시 확인하세요."
+          : authError?.message;
+
+  return (
+    <div className="fixed inset-0 z-[70] bg-[rgba(32,33,36,0.14)] backdrop-blur-[1px]">
+      <div className="mx-auto flex min-h-screen max-w-[1480px] items-start justify-center px-6 py-16">
+        <div className="grid w-full max-w-[1040px] gap-0 overflow-hidden rounded-[32px] border border-[#dee1d9] bg-white shadow-[0_26px_80px_rgba(31,38,34,0.18)] lg:grid-cols-[260px_minmax(0,1fr)]">
+          <aside className="border-r border-[#eceee8] bg-[#fbfbf8] p-5">
+            <div className="mb-6 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-semibold">설정</p>
+                <p className="text-xs text-[#7a7f76]">계정과 워크스페이스 표시 설정</p>
+              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="grid h-9 w-9 place-items-center rounded-full border border-[#e1e4dc] bg-white text-[#4d534b]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <SettingsNavButton
+                active={selectedTab === "account"}
+                icon={selectedTab === "account" ? <CircleDot className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
+                label="회원 정보"
+                onClick={() => onSelectTab("account")}
+              />
+              <SettingsNavButton
+                active={selectedTab === "workspace"}
+                icon={selectedTab === "workspace" ? <CircleDot className="h-4 w-4" /> : <Circle className="h-4 w-4" />}
+                label="설정"
+                onClick={() => onSelectTab("workspace")}
+              />
+            </div>
+          </aside>
+
+          <section className="min-w-0 p-6">
+            {selectedTab === "account" ? (
+              <div>
+                <h2 className="text-2xl font-semibold">회원 정보</h2>
+                <div className="mt-6 rounded-[28px] border border-[#eceee8] bg-[#fafaf7] p-5">
+                  <div className="flex items-center gap-4">
+                    <div className="grid h-14 w-14 place-items-center rounded-full bg-[#ece9ff] text-lg font-semibold text-[#7f6bff]">
+                      {displayName.slice(0, 1)}
+                    </div>
+                    <div>
+                      <p className="text-lg font-semibold">{displayName}</p>
+                      <p className="text-sm text-[#6d7168]">{roleLabel}</p>
+                    </div>
+                  </div>
+                  <div className="mt-6 grid gap-3 md:grid-cols-2">
+                    <SettingsInfoRow label="이름" value={currentUser?.name || "-"} />
+                    <SettingsInfoRow label="이메일" value={currentUser?.email || "-"} />
+                    <SettingsInfoRow
+                      label="가입 시각"
+                      value={currentUser?.createdAt ? formatDate(currentUser.createdAt) : "-"}
+                    />
+                    <SettingsInfoRow label="역할" value={roleLabel} />
+                  </div>
+                </div>
+
+                {helperText ? (
+                  <div className="mt-4 flex items-start gap-2 rounded-2xl border border-[#efc2b7] bg-[#fff3ef] px-4 py-3 text-sm text-[#8d382d]">
+                    <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                    <p>{helperText}</p>
+                  </div>
+                ) : null}
+
+                {isEditingAccount ? (
+                  <div className="mt-5 rounded-[24px] border border-[#eceee8] bg-[#fafaf7] p-5">
+                    <div className="mb-4">
+                      <p className="text-base font-semibold">회원 정보 변경</p>
+                      <p className="mt-1 text-sm text-[#6f756d]">
+                        현재 백엔드에는 회원 수정 API가 없어서 표시 이름과 역할만 이 브라우저에 저장됩니다.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <SettingsField label="표시 이름">
+                        <input
+                          value={accountDraft.displayName}
+                          onChange={(event) =>
+                            setAccountDraft((current) => ({
+                              ...current,
+                              displayName: event.target.value
+                            }))
+                          }
+                          className="h-11 w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                        />
+                      </SettingsField>
+                      <SettingsField label="역할">
+                        <input
+                          value={accountDraft.roleLabel}
+                          onChange={(event) =>
+                            setAccountDraft((current) => ({
+                              ...current,
+                              roleLabel: event.target.value
+                            }))
+                          }
+                          className="h-11 w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                        />
+                      </SettingsField>
+                    </div>
+
+                    <div className="mt-5 flex items-center justify-between gap-3">
+                      <p className="text-sm text-[#6f756d]">
+                        {savedMessage || "저장 시 좌측 프로필과 인사 문구에 바로 반영됩니다."}
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAccountDraft({ displayName, roleLabel });
+                            setIsEditingAccount(false);
+                          }}
+                          className="inline-flex h-10 items-center rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm text-[#495047]"
+                        >
+                          취소
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onPreferencesChange((current) => ({
+                              ...current,
+                              displayName: accountDraft.displayName,
+                              roleLabel: accountDraft.roleLabel
+                            }));
+                            onSavePreferences();
+                            setIsEditingAccount(false);
+                          }}
+                          className="inline-flex h-10 items-center gap-2 rounded-2xl bg-[#273127] px-4 text-sm font-semibold text-white"
+                        >
+                          <Settings2 className="h-4 w-4" />
+                          저장
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="mt-6 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingAccount(true)}
+                    className="inline-flex h-10 items-center gap-2 rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm text-[#495047]"
+                  >
+                    <BadgeInfo className="h-4 w-4" />
+                    회원 정보 변경
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onLogout}
+                    className="inline-flex h-10 items-center gap-2 rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm text-[#495047]"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    로그아웃
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onDeleteAccount}
+                    disabled={deletePending}
+                    className="inline-flex h-10 items-center gap-2 rounded-2xl border border-[#f0d0ca] bg-[#fff6f4] px-4 text-sm text-[#8a5b54] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {deletePending ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-4 w-4" />
+                    )}
+                    회원 탈퇴
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <h2 className="text-2xl font-semibold">설정</h2>
+                <p className="mt-2 text-sm text-[#70756d]">
+                  워크스페이스에 표시되는 이름과 역할은 현재 브라우저에 저장됩니다.
+                </p>
+
+                <div className="mt-6 space-y-4">
+                  <SettingsField label="표시 이름">
+                    <input
+                      value={preferences.displayName}
+                      onChange={(event) =>
+                        onPreferencesChange((current) => ({
+                          ...current,
+                          displayName: event.target.value
+                        }))
+                      }
+                      className="h-11 w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                    />
+                  </SettingsField>
+                  <SettingsField label="역할 라벨">
+                    <input
+                      value={preferences.roleLabel}
+                      onChange={(event) =>
+                        onPreferencesChange((current) => ({
+                          ...current,
+                          roleLabel: event.target.value
+                        }))
+                      }
+                      className="h-11 w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                    />
+                  </SettingsField>
+                  <SettingsField label="워크스페이스 이름">
+                    <input
+                      value={preferences.teamName}
+                      onChange={(event) =>
+                        onPreferencesChange((current) => ({
+                          ...current,
+                          teamName: event.target.value
+                        }))
+                      }
+                      className="h-11 w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 text-sm outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                    />
+                  </SettingsField>
+                  <SettingsField label="메모">
+                    <textarea
+                      value={preferences.note}
+                      onChange={(event) =>
+                        onPreferencesChange((current) => ({
+                          ...current,
+                          note: event.target.value
+                        }))
+                      }
+                      rows={5}
+                      className="w-full rounded-2xl border border-[#d9ddd4] bg-white px-4 py-3 text-sm leading-6 outline-none focus:border-[#7f9f67] focus:ring-2 focus:ring-[#d7ebc8]"
+                    />
+                  </SettingsField>
+                </div>
+
+                <div className="mt-6 flex items-center justify-between gap-3">
+                  <p className="text-sm text-[#6f756d]">
+                    {savedMessage || "저장 시 이 브라우저에 즉시 반영됩니다."}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={onSavePreferences}
+                    className="inline-flex h-10 items-center gap-2 rounded-2xl bg-[#273127] px-4 text-sm font-semibold text-white"
+                  >
+                    <Settings2 className="h-4 w-4" />
+                    저장
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsNavButton({
+  active,
+  icon,
+  label,
+  onClick
+}: {
+  active: boolean;
+  icon: ReactNode;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-2xl px-3 py-3 text-left text-sm ${
+        active ? "bg-white font-semibold text-[#232521]" : "text-[#5b6058] hover:bg-white"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function SettingsInfoRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-2xl border border-[#e5e7e0] bg-white px-4 py-4">
+      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c9288]">{label}</p>
+      <p className="mt-2 break-all text-sm font-medium text-[#232521]">{value}</p>
+    </div>
+  );
+}
+
+function SettingsField({
+  label,
+  children
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-sm font-medium text-[#454a43]">{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -1091,6 +2510,9 @@ function ReportWorkspace({
   const message = getEffectiveMessage(report);
   const [now, setNow] = useState(() => Date.now());
   const papers = useMemo(() => report?.searchResults ?? [], [report]);
+  const visualizationAssets = useMemo(() => getVisualizationAssets(report), [report]);
+  const hasVisualizationAssets = Object.keys(visualizationAssets).length > 0;
+  const hasVisualizationMarkdown = hasMarkdownImages(report?.mergedReport);
   const { cards, stats } = useMemo(
     () => buildPipelineCards(report, loading),
     [loading, report]
@@ -1102,14 +2524,7 @@ function ReportWorkspace({
     return () => window.clearInterval(timer);
   }, [status]);
 
-  const searchRetrySeconds = useMemo(() => {
-    if (status !== "PROCESSING" || currentStage !== "search" || !report?.pipeline?.startedAt) {
-      return 0;
-    }
-    const startedAt = new Date(report.pipeline.startedAt).getTime();
-    if (Number.isNaN(startedAt)) return 0;
-    return Math.max(0, Math.floor((now - startedAt) / 1000));
-  }, [currentStage, now, report?.pipeline?.startedAt, status]);
+  const processingBanner = useMemo(() => getProcessingStageBody(report, now), [now, report]);
   if (!report && !loading) {
     return (
       <section className="mx-auto grid max-w-[1440px] gap-4 xl:grid-cols-[1.2fr_0.8fr]">
@@ -1119,13 +2534,13 @@ function ReportWorkspace({
             <div>
               <h1 className="text-2xl font-semibold">비교할 보고서가 없습니다</h1>
               <p className="mt-1 text-sm text-[#666b62]">
-                상단 입력 영역에서 주제를 입력하면 GPT 초안과 Claude 초안을 나란히 비교합니다.
+                상단 입력 영역에서 주제를 입력하면 Claude 초안과 최종 편집 흐름을 확인합니다.
               </p>
             </div>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
             <EmptyStep title="1. 주제 입력" body="Spring /api/pipeline/run으로 실행 요청" />
-            <EmptyStep title="2. 초안 비교" body="GPT와 Claude 결과를 2열로 확인" />
+            <EmptyStep title="2. 초안 생성" body="Claude 결과를 확인하고 편집기로 넘기기" />
             <EmptyStep title="3. 리뷰/최종본" body="검토 결과와 병합 보고서 확인" />
           </div>
         </div>
@@ -1158,7 +2573,6 @@ function ReportWorkspace({
             </Link>
           ) : null}
           <StatusBadge loading={loading} status={status} currentStage={currentStage} />
-          <LegendInline />
         </div>
       </div>
 
@@ -1184,16 +2598,8 @@ function ReportWorkspace({
         <ExecutionBanner
           tone="progress"
           title="파이프라인 실행 중"
-          body={
-            currentStage === "search" && searchRetrySeconds >= 15
-              ? `외부 검색 API 재시도 중입니다. 현재 ${searchRetrySeconds}초째 search 단계를 처리하고 있습니다.`
-              : `현재 ${currentStage || "search"} 단계 진행 상태를 기다리는 중입니다.`
-          }
-          meta={
-            currentStage === "search" && searchRetrySeconds >= 15
-              ? `search retry · ${searchRetrySeconds}s`
-              : currentStage || "PROCESSING"
-          }
+          body={processingBanner.body}
+          meta={processingBanner.meta}
         />
       ) : null}
 
@@ -1209,7 +2615,7 @@ function ReportWorkspace({
         ))}
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.25fr_0.75fr]">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
         <article className="rounded-lg border border-[#d8dcd2] bg-white">
           <div className="border-b border-[#e4e8e0] px-4 py-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -1232,6 +2638,12 @@ function ReportWorkspace({
           </div>
 
           <div className="p-4">
+            {status === "PROCESSING" && currentStage === "reader" ? (
+              <div className="mb-4 rounded-lg border border-[#d8e5fb] bg-[#f5f9ff] px-4 py-3 text-sm leading-6 text-[#32598b]">
+                <p className="font-semibold">논문 요약 생성 중</p>
+                <p className="mt-1">{getReaderEmptyText(report)}</p>
+              </div>
+            ) : null}
             {activeTab === "search" ? (
               <PapersTable
                 title="검색된 논문 목록"
@@ -1239,7 +2651,7 @@ function ReportWorkspace({
                 papers={papers}
                 showSelection={false}
                 emptyText={
-                  status === "PROCESSING"
+                  status === "PROCESSING" && currentStage === "search"
                     ? "아직 search 결과 파일이 생성되지 않았습니다."
                     : status === "COMPLETED" && errorCode === "SEARCH_EMPTY_RESULT"
                       ? "검색 결과 0건으로 종료되었습니다."
@@ -1254,62 +2666,53 @@ function ReportWorkspace({
                 description="Relevance Agent가 계산한 점수와 선정 여부를 중심으로 검토합니다."
                 papers={report?.relevanceResults ?? []}
                 showSelection
-                emptyText={
-                  status === "PROCESSING"
-                    ? "아직 relevance 결과 파일이 생성되지 않았습니다."
-                    : "아직 표시할 관련성 결과가 없습니다."
-                }
+                emptyText={getRelevanceEmptyText(report)}
               />
             ) : null}
 
             {activeTab === "draft" ? (
               <div className="space-y-4">
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <DraftPanel
-                    title="GPT 초안"
-                    accent="gpt"
-                    body={report?.gptDraft}
-                    commonHighlights={commonHighlights}
-                    differentHighlights={differentHighlights}
-                  />
-                  <DraftPanel
-                    title="Claude 초안"
-                    accent="claude"
-                    body={report?.claudeDraft}
-                    commonHighlights={commonHighlights}
-                    differentHighlights={differentHighlights}
-                  />
-                </div>
+              <div className="grid gap-4">
+                <DraftPanel
+                  title="Claude 초안"
+                  accent="claude"
+                  body={report?.claudeDraft}
+                  commonHighlights={commonHighlights}
+                  differentHighlights={differentHighlights}
+                />
+              </div>
 
-                <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-1">
-                    <HighlightPanel
-                      title="공통 내용"
-                      tone="common"
-                      items={commonHighlights}
-                      emptyText="공통 하이라이트가 없습니다."
-                    />
-                    <HighlightPanel
-                      title="차이 내용"
-                      tone="different"
-                      items={differentHighlights}
-                      emptyText="차이 하이라이트가 없습니다."
-                    />
-                  </div>
-
+                <div className="grid gap-4">
                   <div className="grid gap-4">
-                    <DocumentPanel
-                      title="Review 결과"
-                      icon={<GitCompare className="h-4 w-4" />}
-                      body={textOrEmpty(report?.reviewResult)}
-                      minHeight="min-h-[160px]"
-                    />
-                    <DocumentPanel
-                      title="Merge 최종 보고서"
-                      icon={<CheckCircle2 className="h-4 w-4" />}
-                      body={textOrEmpty(report?.mergedReport)}
-                      minHeight="min-h-[260px]"
-                    />
+                    {!hasVisualizationMarkdown ? (
+                      <div className="rounded-lg border border-[#e4e8e0] bg-[#fafbf8] px-4 py-3 text-sm leading-6 text-[#697067]">
+                        <p className="font-medium text-[#3c433d]">시각화 이미지 상태</p>
+                        {hasVisualizationAssets ? (
+                          <ol className="mt-2 space-y-1 pl-5 list-decimal">
+                            {Object.entries(visualizationAssets).map(([key, value]) => (
+                              <li key={key}>
+                                <span className="font-medium text-[#3c433d]">{key}</span>
+                                <span className="ml-2 break-all text-[#697067]">{value}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p className="mt-1">이 run에는 시각화 이미지가 없습니다.</p>
+                        )}
+                      </div>
+                    ) : hasVisualizationAssets ? (
+                      <div className="rounded-lg border border-[#e4e8e0] bg-[#fafbf8] px-4 py-3 text-sm leading-6 text-[#697067]">
+                        <p className="font-medium text-[#3c433d]">시각화 이미지 목록</p>
+                        <ol className="mt-2 space-y-1 pl-5 list-decimal">
+                          {Object.entries(visualizationAssets).map(([key, value]) => (
+                            <li key={key}>
+                              <span className="font-medium text-[#3c433d]">{key}</span>
+                              <span className="ml-2 break-all text-[#697067]">{value}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1322,7 +2725,6 @@ function ReportWorkspace({
             searchCount={stats.searchCount}
             summaryCount={stats.summaryCount}
             relevanceCount={stats.relevanceCount}
-            reportPath={stats.reportPath}
           />
           <QuickActionPanel
             reportId={report?.id}
@@ -1844,7 +3246,26 @@ function PapersTable({
       ) : (
         <div className="overflow-hidden rounded-lg border border-[#dde1d8]">
           <div className="thin-scrollbar overflow-auto">
-            <table className="min-w-full border-collapse text-sm">
+            <table className="w-full table-fixed border-collapse text-sm">
+{showSelection ? (
+                <colgroup>
+                  <col className="w-[20%]" />
+                  <col className="w-[13%]" />
+                  <col className="w-[7%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[35%]" />
+                  <col className="w-[7%]" />
+                  <col className="w-[8%]" />
+                </colgroup>
+              ) : (
+                <colgroup>
+                  <col className="w-[22%]" />
+                  <col className="w-[15%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[12%]" />
+                  <col className="w-[40%]" />
+                </colgroup>
+              )}
               <thead className="bg-[#f6f8f3] text-left text-[#5a6057]">
                 <tr>
                   <th className="px-4 py-3 font-semibold">논문 제목</th>
@@ -1852,29 +3273,41 @@ function PapersTable({
                   <th className="px-4 py-3 font-semibold">연도</th>
                   <th className="px-4 py-3 font-semibold">출처</th>
                   <th className="px-4 py-3 font-semibold">요약</th>
-                  <th className="px-4 py-3 font-semibold">점수</th>
+                  
                   {showSelection ? (
-                    <th className="px-4 py-3 font-semibold">선정</th>
+                    <th className="px-4 py-3 text-center font-semibold">점수</th>
                   ) : null}
+                  {showSelection ? (
+                    <th className="px-4 py-3 text-center font-semibold">선정</th>
+                  ) : null}
+
                 </tr>
               </thead>
               <tbody>
                 {papers.map((paper) => (
                   <tr key={String(paper.id ?? paper.title)} className="border-t border-[#edf0e9] align-top">
-                    <td className="px-4 py-3 font-medium text-[#202124]">{paper.title}</td>
+                    <td className="px-4 py-3 align-top">
+                      <p className="line-clamp-3 font-medium leading-6 text-[#202124]">
+                        {paper.title}
+                      </p>
+                    </td>
                     <td className="px-4 py-3 text-[#5f655d]">
                       {(paper.authors || []).join(", ") || "-"}
                     </td>
                     <td className="px-4 py-3 text-[#5f655d]">{paper.year ?? "-"}</td>
                     <td className="px-4 py-3 text-[#5f655d]">{paper.source ?? "-"}</td>
-                    <td className="max-w-[360px] px-4 py-3 leading-6 text-[#353934]">
-                      {paper.summary || "-"}
-                    </td>
-                    <td className="px-4 py-3 text-[#202124]">
-                      {paper.relevanceScore != null ? `${paper.relevanceScore}` : "-"}
+                    <td className="px-4 py-3 align-top">
+                      <p className="line-clamp-5 text-sm leading-6 text-[#3f453d]">
+                        {paper.summary || "-"}
+                      </p>
                     </td>
                     {showSelection ? (
-                      <td className="px-4 py-3">
+                      <td className="px-3 py-3 text-center font-medium text-[#202124]">
+                        {paper.relevanceScore != null ? `${paper.relevanceScore}` : "-"}
+                      </td>
+                    ) : null}
+                    {showSelection ? (
+                      <td className="px-3 py-3 text-center">
                         <span
                           className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
                             paper.selected
@@ -1900,13 +3333,13 @@ function PapersTable({
 function PipelineSummaryPanel({
   searchCount,
   summaryCount,
-  relevanceCount,
-  reportPath
+  relevanceCount
+  // reportPath
 }: {
   searchCount: number;
   summaryCount: number;
   relevanceCount: number;
-  reportPath: string;
+  // reportPath: string;
 }) {
   return (
     <aside className="rounded-lg border border-[#d8dcd2] bg-white p-5">
@@ -1923,7 +3356,6 @@ function PipelineSummaryPanel({
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8b9087]">
           저장 경로
         </p>
-        <p className="mt-2 break-all text-sm leading-6 text-[#4f564c]">{reportPath}</p>
       </div>
     </aside>
   );
@@ -1989,19 +3421,7 @@ function QuickActionPanel({
           <Archive className="h-4 w-4 text-[#5f655c]" />
         </button>
 
-        <button
-          type="button"
-          onClick={onPrintWorkspace}
-          className="flex w-full items-center justify-between rounded-md border border-[#d9ddd4] bg-[#fbfcf8] px-3 py-3 text-left hover:bg-[#f2f5ee]"
-        >
-          <span>
-            <span className="block text-sm font-medium">Markdown/PDF 출력</span>
-            <span className="mt-1 block text-xs text-[#6f756d]">
-              보고서 초안과 경로를 기준으로 출력
-            </span>
-          </span>
-          <Download className="h-4 w-4 text-[#5f655c]" />
-        </button>
+
       </div>
 
       {topic ? (
@@ -2022,7 +3442,6 @@ function ComposerPanel({
   onAppendText: (sourceTitle: string, text?: string) => void;
 }) {
   const actionItems = [
-    { title: "GPT 초안 가져오기", value: report?.gptDraft },
     { title: "Claude 초안 가져오기", value: report?.claudeDraft },
     { title: "Review 결과 가져오기", value: report?.reviewResult },
     { title: "Merge 최종본 가져오기", value: report?.mergedReport }
@@ -2035,7 +3454,7 @@ function ComposerPanel({
         <h2 className="text-sm font-semibold">문서 조합 패널</h2>
       </div>
       <p className="mt-2 text-sm leading-6 text-[#667064]">
-        비교 결과를 편집기로 바로 가져와 문서처럼 다듬고, 마지막에 브라우저 인쇄로
+        Claude 결과를 편집기로 바로 가져와 문서처럼 다듬고, 마지막에 브라우저 인쇄로
         PDF 저장까지 이어집니다.
       </p>
 
@@ -2108,21 +3527,6 @@ function StatusBadge({
   );
 }
 
-function LegendInline() {
-  return (
-    <div className="inline-flex h-8 items-center gap-3 rounded-md border border-[#d9ddd4] bg-[#fbfcf8] px-3 text-xs text-[#555a52]">
-      <span className="inline-flex items-center gap-1.5">
-        <span className="h-3 w-3 rounded-sm bg-[#dff3df] ring-1 ring-[#a7d8ae]" />
-        공통
-      </span>
-      <span className="inline-flex items-center gap-1.5">
-        <span className="h-3 w-3 rounded-sm bg-[#f3e8ff] ring-1 ring-[#d6bdf5]" />
-        차이
-      </span>
-    </div>
-  );
-}
-
 function LegendPanel() {
   return (
     <aside className="rounded-lg border border-[#d8dcd2] bg-white p-5">
@@ -2149,15 +3553,12 @@ function DraftPanel({
   differentHighlights
 }: {
   title: string;
-  accent: "gpt" | "claude";
+  accent: "claude";
   body?: string;
   commonHighlights: string[];
   differentHighlights: string[];
 }) {
-  const accentClass =
-    accent === "gpt"
-      ? "border-t-[#3b82f6] bg-[#f8fbff]"
-      : "border-t-[#8b5cf6] bg-[#fcfaff]";
+  const accentClass = accent === "claude" ? "border-t-[#8b5cf6] bg-[#fcfaff]" : "";
 
   return (
     <article
@@ -2171,13 +3572,9 @@ function DraftPanel({
         <span className="text-xs text-[#747970]">Draft</span>
       </div>
       <div className="thin-scrollbar max-h-[520px] flex-1 overflow-auto px-5 py-4">
-        <p className="whitespace-pre-wrap text-[15px] leading-7 text-[#252823]">
-          {renderHighlightedText(
-            textOrEmpty(body),
-            commonHighlights,
-            differentHighlights
-          )}
-        </p>
+        <div className="space-y-1">
+          {renderMarkdownBody(textOrEmpty(body), commonHighlights, differentHighlights)}
+        </div>
       </div>
     </article>
   );
@@ -2243,9 +3640,7 @@ function DocumentPanel({
         <h2 className="text-sm font-semibold">{title}</h2>
       </div>
       <div className={`thin-scrollbar max-h-[520px] overflow-auto px-5 py-4 ${minHeight}`}>
-        <p className="whitespace-pre-wrap text-[15px] leading-7 text-[#252823]">
-          {body}
-        </p>
+        <div className="space-y-1">{renderMarkdownBody(body)}</div>
       </div>
     </article>
   );

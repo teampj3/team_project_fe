@@ -32,6 +32,40 @@ input {
   font: inherit;
 }
 
+button {
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease;
+}
+
+button:enabled:hover {
+  transform: translateY(-1px);
+}
+
+button:enabled:active {
+  transform: translateY(1px) scale(0.992);
+}
+
+.pressable-link {
+  transition:
+    transform 140ms ease,
+    box-shadow 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.pressable-link:hover {
+  transform: translateY(-1px);
+}
+
+.pressable-link:active {
+  transform: translateY(1px) scale(0.992);
+}
+
 ::selection {
   background: #edd8ca;
 }
@@ -48,4 +82,74 @@ input {
 .thin-scrollbar::-webkit-scrollbar-thumb {
   background: #d6d2ca;
   border-radius: 999px;
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #111111 !important;
+  }
+
+  body {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .print\:hidden {
+    display: none !important;
+  }
+
+  .print\:block {
+    display: block !important;
+  }
+
+  .print\:mx-0 {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+
+  .print\:max-w-none {
+    max-width: none !important;
+  }
+
+  .print\:px-0 {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  .print\:py-0 {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+
+  .print\:grid {
+    display: grid !important;
+  }
+}
+.quick-topic-flip {
+  animation: quickTopicSoftFlip 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+  transform-origin: center bottom;
+  backface-visibility: hidden;
+  will-change: transform, opacity, filter;
+}
+
+@keyframes quickTopicSoftFlip {
+  0% {
+    opacity: 0;
+    transform: translateY(14px) scale(0.96) rotateX(-18deg);
+    filter: blur(4px);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.01) rotateX(2deg);
+    filter: blur(0);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1) rotateX(0deg);
+    filter: blur(0);
+  }
 }
